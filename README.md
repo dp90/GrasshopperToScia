@@ -10,4 +10,6 @@ The components contain the following functionality:
 5. PointLoads attaches values to each node selected that represent the point load acting on that node
 6. DistributedLoads attaches values to each 1D element selected that represent the distributed load acting on that elemement
 
+The components are also available as .txt files. 
+
 Send me a message, if you are interested in the required .def.xml file to be able to run the models in Scia Engineer.  
