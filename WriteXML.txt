@@ -1,0 +1,2126 @@
+using Rhino;
+using Rhino.Geometry;
+using Rhino.DocObjects;
+using Rhino.Collections;
+
+using GH_IO;
+using GH_IO.Serialization;
+using Grasshopper;
+using Grasshopper.Kernel;
+using Grasshopper.Kernel.Data;
+using Grasshopper.Kernel.Types;
+
+using System;
+using System.IO;
+using System.Xml;
+using System.Xml.Linq;
+using System.Linq;
+using System.Data;
+using System.Drawing;
+using System.Reflection;
+using System.Collections;
+using System.Windows.Forms;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+
+
+/// <summary>
+/// This class will be instantiated on demand by the Script component.
+/// </summary>
+public class Script_Instance : GH_ScriptInstance
+{
+#region Utility functions
+  /// <summary>Print a String to the [Out] Parameter of the Script component.</summary>
+  /// <param name="text">String to print.</param>
+  private void Print(string text) { /* Implementation hidden. */ }
+  /// <summary>Print a formatted String to the [Out] Parameter of the Script component.</summary>
+  /// <param name="format">String format.</param>
+  /// <param name="args">Formatting parameters.</param>
+  private void Print(string format, params object[] args) { /* Implementation hidden. */ }
+  /// <summary>Print useful information about an object instance to the [Out] Parameter of the Script component. </summary>
+  /// <param name="obj">Object instance to parse.</param>
+  private void Reflect(object obj) { /* Implementation hidden. */ }
+  /// <summary>Print the signatures of all the overloads of a specific method to the [Out] Parameter of the Script component. </summary>
+  /// <param name="obj">Object instance to parse.</param>
+  private void Reflect(object obj, string method_name) { /* Implementation hidden. */ }
+#endregion
+
+#region Members
+  /// <summary>Gets the current Rhino document.</summary>
+  private readonly RhinoDoc RhinoDocument;
+  /// <summary>Gets the Grasshopper document that owns this script.</summary>
+  private readonly GH_Document GrasshopperDocument;
+  /// <summary>Gets the Grasshopper script component that owns this script.</summary>
+  private readonly IGH_Component Component;
+  /// <summary>
+  /// Gets the current iteration count. The first call to RunScript() is associated with Iteration==0.
+  /// Any subsequent call within the same solution will increment the Iteration count.
+  /// </summary>
+  private readonly int Iteration;
+#endregion
+
+  /// <summary>
+  /// This procedure contains the user code. Input parameters are provided as regular arguments,
+  /// Output parameters as ref arguments. You don't have to assign output parameters,
+  /// they will have a default value.
+  /// </summary>
+  private void RunScript(bool write, string deffile, string filename, string path, DataTree<System.Object> CurveElements, DataTree<System.Object> PointLoads, DataTree<System.Object> LineLoads, DataTree<object> Supports, DataTree<object> ElementHinges, ref object A)
+  {
+                                                                                                                                                                                                                                                                                            /*
+    This script produces an xml file (formatted for Scia) including data for cross sections, load cases, points, lines/curves
+    point loads and line loads. More Scia functionality can be implemented, but is currently not yet implemented. Export a
+    Scia file as xml with required functionality to see what needs to be coded below.
+
+    To thoroughly understand what is coded below, compare it with an actual output xml file.
+
+    The xml format is like a data tree. The stem is 'project' and each data type (cross sections or nodes) is located in its
+    own branch, called 'container'. A branch is recognized by for example "<container> </container>" or "<container />". In
+    the C# code below, they are called the Elements. Values are stored in the elements by means of Attributes. For example,
+    in the nodes branch, each node gets its own branch. Each node has branches for the coordinates. The values of the coordinates
+    are stored as attribute for each coordinate branch: for the element x-coordinate a value of 0.0 could be assigned by giving
+    an attribute the value of 0.0 and appending it to the attributes of the element x-coordinate. This would look like:
+    <p1 v="0.0"/>. p1 is the branch for the x-coordinate, v an attribute belonging to p1 with a value of 0.0.
+
+    Structure of code below:
+    1. Reorganizing input data from CurveElements, PointLoads and LineLoads to a format usable to create xml branches
+      a) Extracting cross section data from CurveElements
+      b) Extracting points from CurveElements that define lines and points
+      c) Rearranging PointLoads data to usable format
+      d) Rearranging LineLoads data to usable format
+    2. Creation of xml file branches
+  */
+
+    // Definition of cross section profile libraries. These are needed to make Scia understand the cross sections put in.
+    // More can be included: check and compare Scia's profile library to see how it works.
+    List<string> CSList = new List<string>();
+    List<string> CSType = new List<string>();
+    List<string> CSType2 = new List<string>();
+    List<string> CSName = new List<string>();
+    List<List<string>> LibPart = new List<List<string>>();
+    List<string> ProfLib1 = new List<string>{"'HD'","'HD(ARC)'","'HE'","'HEA'","'HEB'","'HEC'","'HEM'","'HHD'",
+        "'HL'","'HL(SZS)'","'HP(ARC)'","'I'","'INP'","'IPE'","'IPN'","'ITM'","'J'","'PEA'","'RSJ'","'UB'","'UB(ARC)'",
+        "'UBP'","'UC'","'UC(ARC)'","'UKB'","'UKBP'","'UKC'"};
+    List<string> ProfLib2 = new List<string>{"'CFRHS'","'MSH'","'QRO'","'RHS'",
+        "'RHS(Ce)'","'RHS(Ju)'","'RHSCF'","'RHSCF(Hy)'","'RRK'","'RRO'","'RRW'",
+        "'SHS'","'SHS(Ce)'","'SHS(Ju)'","'SHSCF'","'SHSCF(Hy)'","'VHP'"};
+    List<string> ProfLib3 = new List<string>{"'CFCHS'","'CHS'","'CHS(Ce)'","'CHS(Ju)'",
+        "'CHSCF'","'CHSCF(Hy)'","'LCHS(Ce)'","'MSRR'","'RO'","'ROR'"};
+    List<string> ProfLib4 = new List<string>{"'HFLeq'","'HFLue'","'L'","'L(ARC)'",
+        "'L(ARCI)'","'L(CSN)'","'LNPeq'","'LNPue'","'LS'","'RSEA'","'RSUA'",
+        "'UKA(EA)'","'UKA(UA)'"};
+
+    // Get all cross section data from CurveElements and attach a cross section name to each curve
+    for (int k = 0; CurveElements.Branch(k, 0) != null ; k++ ) { // this branch contains CS data
+      int index = new int();
+      string profile = Convert.ToString(CurveElements.Branch(k, 0)[0]);
+      if (CSList.Contains(profile) == false) { // adds CS if it's not yet in the CS list
+        CSList.Add(profile);
+        CSName.Add("CS" + (CSList.Count()).ToString());  // numbers the cross sections for the xml file
+        for (int j = 0; j < profile.Count(); j++) // loops through the characters of the string to get the type, e.g. "IPE"
+        {
+          if (Char.IsDigit(profile[j]))
+          {
+            index = j;
+            break;
+          }
+        }
+        string cstype = "'" + profile.Substring(0, index) + "'";
+        if (ProfLib1.Contains(cstype)){       // depending on the type (e.g. "IPE") finds the related ProfLib defined above
+          List<string> a = new List<string>();  // CS is then formatted for use in Beam Elements container of xml file
+          a.Add("1");
+          a.Add("I-doorsnede");
+          LibPart.Add(a);
+        } else if (ProfLib2.Contains(cstype)) {
+          List<string> a = new List<string>();
+          a.Add("2");
+          a.Add("Rechthoekige holle doorsnede");
+          LibPart.Add(a);
+        } else if (ProfLib3.Contains(cstype)) {
+          List<string> a = new List<string>();
+          a.Add("3");
+          a.Add("Cirkelvormige holle doorsnede");
+          LibPart.Add(a);
+        } else if (ProfLib4.Contains(cstype)) {
+          List<string> a = new List<string>();
+          a.Add("4");
+          a.Add("L-doorsnede");
+          LibPart.Add(a);
+        }
+      }
+      index = CSList.IndexOf(profile);
+      CSType.Add(CSName[index] + " - " + profile);
+      if (CSType2.Contains(CSName[index] + " - " + profile) == false) { // adds CS if it's not yet in the CS list
+        CSType2.Add(CSName[index] + " - " + profile);
+      }
+    }
+
+    // Create beam data from input CurveElements (defined by points)
+    List<string> BeamName = new List<string>();                 // list with names of beams (e.g. "S4")
+    List<List<string>> BeamNodes = new List<List<string>>();    // list with list of nodes that define each curve/line
+    List<string> BeamCS = new List<string>();                   // list with CS data for each beam
+    List<string> BeamType = new List<string>();                 // list with beam type data for each beam (e.g. "line"/"spline")
+    List<Point3d> nodes = new List<Point3d>();                  // list with all nodes from input
+    List<string> NodeName = new List<string>();                 // list with names for all nodes from input (e.g. "K1")
+
+    for (int k = 0; CurveElements.Branch(k, 0) != null ; k++ ) {
+      for (int m = 0; CurveElements.Branch(k, 1, m) != null; m++) {   // each line/curve is given a name "Sx"
+        BeamName.Add("S" + Convert.ToString(BeamName.Count() + 1));
+        BeamNodes.Add(new List<string>());    // adds list for nodes of each line/curve (list filled later)
+        BeamCS.Add(CSType[k]);                // adds CS-type for each beam
+        if (CurveElements.Branch(k, 1, m).Count() == 2) {
+          BeamType.Add("Lijn");               // adds lijn if beam is a line
+        } else {
+          BeamType.Add("Spline");             // adds spline if beam is a curve
+        }
+        for (int j = 0; j < CurveElements.Branch(k, 1, m).Count() ; j++) {
+          Point3d pt;
+          pt = (Point3d) CurveElements.Branch(k, 1, m)[j];
+          if (nodes.Contains(pt) == false) {
+            nodes.Add(pt);                    // nodes are added to list containing all nodes, if they are not already in list
+            NodeName.Add("K" + Convert.ToString(NodeName.Count() + 1));  // names are added to list for each node
+          }
+          int index = nodes.IndexOf(pt);
+          BeamNodes[BeamNodes.Count - 1].Add(NodeName[index]);  // list created earlier filled here with the names of the nodes
+        }                                                       // that define the related line or curve
+      }
+    }
+
+    // check if 0, 1 or multiple PointLoads nodes are attached and, if needed, reformat data to usable format
+    //    DataTree<Object> elements = new DataTree<Object>();
+    //    if (PointLoads.Branch(0, 0) == null && PointLoads.BranchCount != 0) {
+    //      for (int k = 0; k < PointLoads.BranchCount; k++) {
+    //        for (int j = 0 ; j < PointLoads.Branch(k).Count() ; j++ ) {
+    //          elements.Add(PointLoads.Branch(k)[j], new GH_Path(0, k));
+    //        }
+    //      }
+    //      PointLoads = elements;
+    //    }
+
+    // check if 0, 1 or multiple LineLoads nodes are attached and, if needed, reformat data to usable format
+    //    DataTree<Object> elements2 = new DataTree<Object>();
+    //    if (LineLoads.Branch(0, 0, 0) == null && LineLoads.BranchCount != 0) {
+    //      int length = new int();
+    //      int counter = new int();
+    //      length = LineLoads.Branch(LineLoads.BranchCount - 1).Count();
+    //      counter = LineLoads.BranchCount;
+    //      for (int k = 0; k < length; k++) {
+    //        for (int j = 0 ; j < LineLoads.Branch(0, k).Count() ; j++ ) {
+    //          elements2.Add(LineLoads.Branch(0, k)[j], new GH_Path(0, 0, k));
+    //        }
+    //        elements2.Add(LineLoads.Branch(counter - 4)[k], new GH_Path(0, counter - 4));
+    //        elements2.Add(LineLoads.Branch(counter - 3)[k], new GH_Path(0, counter - 3));
+    //        elements2.Add(LineLoads.Branch(counter - 2)[k], new GH_Path(0, counter - 2));
+    //        elements2.Add(LineLoads.Branch(counter - 1)[k], new GH_Path(0, counter - 1));
+    //      }
+    //      LineLoads = elements2;
+    //    }
+
+    List<string> SupMemName = new List<string>();        // list for node names on which point loads act
+    List<string> SupDofX = new List<string>();           // list for d.o.f. restriction in X direction
+    List<string> SupDofY = new List<string>();           // list for d.o.f. restriction in Y direction
+    List<string> SupDofZ = new List<string>();           // list for d.o.f. restriction in Z direction
+    List<string> SupDofRx = new List<string>();          // list for d.o.f. restriction in Rx rotation
+    List<string> SupDofRy = new List<string>();          // list for d.o.f. restriction in Ry rotation
+    List<string> SupDofRz = new List<string>();          // list for d.o.f. restriction in Rz rotation
+
+    // adding the PointLoads data to the lists specified above
+    for (int k = 0 ; Supports.Branch(k, 0) != null ; k++) {
+      for (int j = 0 ; j < Supports.Branch(k, 0).Count() ; j++) {
+        Point3d pt = (Point3d) Supports.Branch(k, 0)[j];
+        if (nodes.Contains(pt) == false ) {
+          nodes.Add(pt);
+          NodeName.Add("K" + (NodeName.Count() + 1).ToString());
+        }
+        int index = nodes.IndexOf(pt);
+        SupMemName.Add(NodeName[index]);
+      }
+      foreach (string X in Supports.Branch(k, 1)) {SupDofX.Add(X); }
+      foreach (string Y in Supports.Branch(k, 2)) {SupDofY.Add(Y); }
+      foreach (string Z in Supports.Branch(k, 3)) {SupDofZ.Add(Z); }
+      foreach (string Rx in Supports.Branch(k, 4)) {SupDofRx.Add(Rx); }
+      foreach (string Ry in Supports.Branch(k, 5)) {SupDofRy.Add(Ry); }
+      foreach (string Rz in Supports.Branch(k, 6)) {SupDofRz.Add(Rz); }
+    }
+
+    List<string> PMemberName = new List<string>();      // list for node names on which point loads act
+    List<string> PLLC = new List<string>();             // list for load case in which point loads act
+    List<string> PLDir = new List<string>();            // list for direction in which point loads act (x, y or z)
+    List<string> PLCS = new List<string>();             // list for coordinate system in which point loads act
+    List<string> PLValue = new List<string>();          // list for magnitudes of point loads
+    List<Vector3d> PLAngle = new List<Vector3d>();      // list for angles with the direction
+
+    // adding the PointLoads data to the lists specified above
+    for (int k = 0 ; PointLoads.Branch(k, 0) != null ; k++) {
+      for (int j = 0 ; j < PointLoads.Branch(k, 0).Count() ; j++) {
+        Point3d pt = (Point3d) PointLoads.Branch(k, 0)[j];
+        if (nodes.Contains(pt) == false ) {
+          nodes.Add(pt);
+          NodeName.Add("K" + (NodeName.Count() + 1).ToString());
+        }
+        int index = nodes.IndexOf(pt);
+        PMemberName.Add(NodeName[index]);
+      }
+      foreach (string loadcase in PointLoads.Branch(k, 1)) {PLLC.Add(loadcase); }
+      foreach (string direction in PointLoads.Branch(k, 2)) {PLDir.Add(direction); }
+      foreach (string coordsyst in PointLoads.Branch(k, 3)) {PLCS.Add(coordsyst); }
+      foreach (string magnitude in PointLoads.Branch(k, 4)) {PLValue.Add(magnitude); }
+      foreach (Vector3d angle in PointLoads.Branch(k, 5)) {PLAngle.Add(angle); }
+    }
+
+    List<string> LMemberName = new List<string>();          // list for beam names on which line loads act
+    List<string> LLLC = new List<string>();                 // list for load case in which line loads act
+    List<string> LLDir = new List<string>();                // list for direction in on which line loads act
+    List<string> LLCS = new List<string>();                 // list for coordinate system in which line loads act
+    List<string> LLValue = new List<string>();              // list for magnitudes of line loads
+    List<List<string>> lines = new List<List<string>>();    // list for nodes defining lines/curves: used to find node names
+
+    // xml file branch for line loads requires the element name of each element a load acts on. Elements are defined through
+    // their nodes. In the nested for loops below, for each line the node names are first found for the nodes that define the
+    // line or curve. Then the list of node names for each line is compared with the lists of node names in the variable called
+    // BeamNodes. If they match, the position of the list in the list BeamNodes is used to find the element's name in the
+    // list BeamName.
+    for (int k = 0 ; LineLoads.Branch(k, 0, 0) != null ; k++) {     // loop through all line load groups
+      for (int m = 0; LineLoads.Branch(k, 0, m) != null ; m++ ) {   // loop through all lines in load group
+        List<string> line = new List<string>();   // list to contain node names for each line
+        for (int j = 0; j < LineLoads.Branch(k, 0, m).Count(); j++) {  // loop through all points in line
+          Point3d pt = (Point3d) LineLoads.Branch(k, 0, m)[j];
+          int index = new int();
+          index = nodes.IndexOf(pt);  // find position of each point in the points list
+          line.Add(NodeName[index]);  // use position to find the node name in the node names list
+        }
+        // look through BeamNodes (list with a list for each line/curve containing the names (e.g. "K2") of its defining nodes
+        for (int counter = 0; counter < BeamNodes.Count() ; counter++) {
+          if (BeamNodes[counter].SequenceEqual(line)) {    // match node names of current line with node names of all lines
+            LMemberName.Add(BeamName[counter]);   // add name of element
+          }
+        }
+      }
+      // add line load data from LineLoads data to lists specified above.
+      foreach (string loadcase in LineLoads.Branch(k, 1)) {LLLC.Add(loadcase); }
+      foreach (string direction in LineLoads.Branch(k, 2)) {LLDir.Add(direction); }
+      foreach (string coordsyst in LineLoads.Branch(k, 3)) {LLCS.Add(coordsyst); }
+      foreach (string magnitude in LineLoads.Branch(k, 4)) {LLValue.Add(magnitude); }
+    }
+
+    List<string> HBeamName = new List<string>();          // list for beam names on which line loads act
+    List<string> HEnds = new List<string>();              // list for magnitudes of line loads
+    List<string> HX = new List<string>();                 // list for load case in which line loads act
+    List<string> HY = new List<string>();                // list for direction in on which line loads act
+    List<string> HZ = new List<string>();                 // list for coordinate system in which line loads act
+    List<string> Hfix = new List<string>();              // list for magnitudes of line loads
+    List<string> Hfiy = new List<string>();              // list for magnitudes of line loads
+    List<string> Hfiz = new List<string>();              // list for magnitudes of line loads
+
+    for (int k = 0 ; ElementHinges.Branch(k, 0, 0) != null ; k++) {     // loop through all line load groups
+      for (int m = 0; ElementHinges.Branch(k, 0, m) != null ; m++ ) {   // loop through all lines in load group
+        List<string> line = new List<string>();   // list to contain node names for each line
+        for (int j = 0; j < ElementHinges.Branch(k, 0, m).Count(); j++) {  // loop through all points in line
+          Point3d pt = (Point3d) ElementHinges.Branch(k, 0, m)[j];
+          int index = new int();
+          index = nodes.IndexOf(pt);  // find position of each point in the points list
+          line.Add(NodeName[index]);  // use position to find the node name in the node names list
+        }
+        // look through BeamNodes (list with a list for each line/curve containing the names (e.g. "K2") of its defining nodes
+        for (int counter = 0; counter < BeamNodes.Count() ; counter++) {
+          if (BeamNodes[counter].SequenceEqual(line)) {    // match node names of current line with node names of all lines
+            HBeamName.Add(BeamName[counter]);   // add name of element
+          }
+        }
+      }
+      // add line load data from LineLoads data to lists specified above.
+      foreach (string ends in ElementHinges.Branch(k, 1)) {HEnds.Add(ends); }
+      foreach (string X in ElementHinges.Branch(k, 2)) {HX.Add(X); }
+      foreach (string Y in ElementHinges.Branch(k, 3)) {HY.Add(Y); }
+      foreach (string Z in ElementHinges.Branch(k, 4)) {HZ.Add(Z); }
+      foreach (string fix in ElementHinges.Branch(k, 5)) {Hfix.Add(fix); }
+      foreach (string fiy in ElementHinges.Branch(k, 6)) {Hfiy.Add(fiy); }
+      foreach (string fiz in ElementHinges.Branch(k, 7)) {Hfiz.Add(fiz); }
+    }
+
+    // add load case data from both point loads and line loads to one list.
+    List<string> LCName = new List<string>();
+    for (int k = 0; k < PLLC.Count() ; k++) {
+      if (LCName.Contains(PLLC[k]) == false) {
+        LCName.Add(PLLC[k]);
+      }
+    }
+    for (int k = 0; k < LLLC.Count() ; k++) {
+      if (LCName.Contains(LLLC[k]) == false) {
+        LCName.Add(LLLC[k]);
+      }
+    }
+
+    // the variables below p0, p1, etc. must be declared before they can be used. "XmlNode" or "XmlAttribute"
+    // specifies their data type.
+    XmlNode p0;
+    XmlNode p1;
+    XmlNode p2;
+    XmlNode p3;
+    XmlNode p4;
+    XmlNode p5;
+    XmlNode p6;
+    XmlNode p7;
+    XmlNode p8;
+    XmlNode p9;
+    XmlNode p10;
+    XmlNode p11;
+    XmlNode p12;
+    XmlNode p13;
+    XmlNode p14;
+    XmlNode p15;
+    XmlNode h5;
+    XmlNode h9;
+    XmlNode row;
+    XmlNode obj;
+    XmlAttribute i;
+    XmlAttribute n;
+    XmlAttribute nm;
+    XmlAttribute x;
+    XmlAttribute v;
+    XmlAttribute v1;
+    XmlAttribute v2;
+    XmlAttribute v3;
+
+
+    // Create the XmlDocument.
+    NameTable nt = new NameTable();
+    string ns = "http://www.scia.cz";
+
+    // Creation of document + declarations of encoding and standalone
+    XmlDocument doc = new XmlDocument(nt);
+    XmlNode XmlDecl = doc.CreateXmlDeclaration("1.0", "UTF-16", "yes");
+    doc.AppendChild(XmlDecl);
+
+    // Begin of main branch (or stem) 'project'
+    XmlNode project = doc.CreateElement("project", ns);
+    doc.AppendChild(project);
+
+    /*
+    The structure of each branch is as follows:
+
+    1. a branch is created using:
+        XmlNode asdf = doc.CreateElement("NameOfBranch", ns);
+    XmlNode is used to declare the type of variable. If the variable is reused, do not declare the type again (gives error).
+    asdf is a variable name used only inside this script to for example append attributes. Below, the convention is used
+    to give the variable the same name as the branch.
+    doc.CreateElement creates an element in the xml document "doc". A namespace must be added. It is declared above as "ns".
+
+    Optional
+    [
+    2. an attribute can be added to the defined element using:
+        XmlAttribute qwer = doc.CreateAttribute("AttributeName");
+    XmlAttribute is used to declare the type of variable. If the variable is reused, do not declare the type again (gives error).
+    qwer  is a variable name used only inside this script to for example append attributes. Below, the convention is used
+    to give the variable the same name as the attribute.
+    doc.CreateAttribute creates an attribute in the xml document "doc".
+
+    3. the attribute can be given an value using:
+    AttributeName.Value = "AttributeValue";
+
+    4. the attribute can be assigned to an element/branch using:
+    NameOfBranch.Attributes.Append(AttributeName);
+    ]
+
+    5. an element/branch can be added to an element/branch upstream using:
+    UpstreamBranch.AppendChild(DownstreamBranch);
+    */
+
+    // def uri: specifies the .xml.def file that Scia uses to read the .xml file
+    XmlNode defUri = doc.CreateElement("def", ns);
+    XmlAttribute defFile = doc.CreateAttribute("uri");
+    defFile.Value = deffile;  // deffile taken as input variable in this component
+    defUri.Attributes.Append(defFile);
+    project.AppendChild(defUri);
+
+    // Cross sections
+    XmlNode container = doc.CreateElement("container", ns);
+    XmlAttribute id = doc.CreateAttribute("id");
+    XmlAttribute t = doc.CreateAttribute("t");
+    id.Value = "{2127A9B3-36BD-11D4-B337-00104BC3B531}";
+    t.Value = "CrossSection.EP_CrossSection.1";
+    container.Attributes.Append(id);
+    container.Attributes.Append(t);
+
+    XmlNode table = doc.CreateElement("table", ns);
+    id = doc.CreateAttribute("id");
+    t = doc.CreateAttribute("t");
+    id.Value = "64D48ACE-4EBE-4BE0-8880-7668F62AB56D";
+    t.Value = "CrossSection.EP_CssGeometry.1";
+    table.Attributes.Append(id);
+    table.Attributes.Append(t);
+    XmlAttribute name = doc.CreateAttribute("name");
+    name.Value = "Cross-sections";
+    table.Attributes.Append(name);
+
+    XmlNode h = doc.CreateElement("h", ns);
+    XmlNode h0 = doc.CreateElement("h0", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Name";
+    h0.Attributes.Append(t);
+    h.AppendChild(h0);
+    XmlNode h1 = doc.CreateElement("h1", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Catalog ID";
+    h1.Attributes.Append(t);
+    h.AppendChild(h1);
+    XmlNode h2 = doc.CreateElement("h2", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Catalog item";
+    h2.Attributes.Append(t);
+    h.AppendChild(h2);
+    XmlNode h3 = doc.CreateElement("h3", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Parameters";
+    h3.Attributes.Append(t);
+    h.AppendChild(h3);
+    table.AppendChild(h);
+
+    // Create obj tables for each Cross section in file
+    for (int j = 0; j < CSList.Count ; j++) {
+      obj = doc.CreateElement("obj", ns);
+      id = doc.CreateAttribute("id");
+      id.Value = (j + 1).ToString();
+      obj.Attributes.Append(id);
+      nm = doc.CreateAttribute("nm");
+      nm.Value = "CS" + (j + 1).ToString();
+      obj.Attributes.Append(nm);
+
+      p0 = doc.CreateElement("p0", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "CS" + (j + 1).ToString();
+      p0.Attributes.Append(v);
+      obj.AppendChild(p0);
+
+
+      p1 = doc.CreateElement("p1", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "EP_CssLib.EP_ProfLib_Rolled.1";
+      p1.Attributes.Append(v);
+      obj.AppendChild(p1);
+
+
+      p2 = doc.CreateElement("p2", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = LibPart[j][0];
+      p2.Attributes.Append(v);
+      obj.AppendChild(p2);
+      p3 = doc.CreateElement("p3", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "";
+      p3.Attributes.Append(t);
+      h = doc.CreateElement("h", ns);
+      h0 = doc.CreateElement("h0", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Name";
+      h0.Attributes.Append(t);
+      h.AppendChild(h0);
+      h1 = doc.CreateElement("h1", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Material";
+      h1.Attributes.Append(t);
+      h.AppendChild(h1);
+      h5 = doc.CreateElement("h5", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Rolled Section";
+      h5.Attributes.Append(t);
+      h.AppendChild(h5);
+      p3.AppendChild(h);
+
+      row = doc.CreateElement("row", ns);
+      id = doc.CreateAttribute("id");
+      id.Value = "0";
+      row.Attributes.Append(id);
+      p0 = doc.CreateElement("p0", ns);
+
+      v = doc.CreateAttribute("v");
+      v.Value = "Materiaal";
+      p0.Attributes.Append(v);
+      row.AppendChild(p0);
+      p1 = doc.CreateElement("p1", ns);
+      i = doc.CreateAttribute("i");
+      i.Value = "152";
+      p1.Attributes.Append(i);
+      n = doc.CreateAttribute("n");
+      n.Value = "S 235";
+      p1.Attributes.Append(n);
+      row.AppendChild(p1);
+      p3.AppendChild(row);
+      row = doc.CreateElement("row", ns);
+      id = doc.CreateAttribute("id");
+      id.Value = "1";
+      row.Attributes.Append(id);
+      p0 = doc.CreateElement("p0", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = LibPart[j][1];
+      p0.Attributes.Append(v);
+      row.AppendChild(p0);
+      p5 = doc.CreateElement("p5", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = CSList[j] + "|" + LibPart[j][0];
+      p5.Attributes.Append(v);
+      row.AppendChild(p5);
+      p3.AppendChild(row);
+      obj.AppendChild(p3);
+      table.AppendChild(obj);
+    }
+
+    container.AppendChild(table);
+    project.AppendChild(container);
+
+
+    // Load groups
+    container = doc.CreateElement("container", ns);
+    id = doc.CreateAttribute("id");
+    t = doc.CreateAttribute("t");
+    id.Value = "{F9D4AA72-49D5-11D4-A3CF-000000000000}";
+    t.Value = "DataSetScia.EP_LoadGroup.1";
+    container.Attributes.Append(id);
+    container.Attributes.Append(t);
+
+    table = doc.CreateElement("table", ns);
+    table = doc.CreateElement("table", ns);
+    id = doc.CreateAttribute("id");
+    t = doc.CreateAttribute("t");
+    name = doc.CreateAttribute("name");
+    id.Value = "CA3C2544-4021-4DE7-B805-DE1BA06ABCB3";
+    t.Value = "DataSetScia.EP_LoadGroup.1";
+    name.Value = "Load groups";
+    table.Attributes.Append(id);
+    table.Attributes.Append(t);
+    table.Attributes.Append(name);
+
+    h = doc.CreateElement("h", ns);
+    h0 = doc.CreateElement("h0", ns);
+    h1 = doc.CreateElement("h1", ns);
+    h2 = doc.CreateElement("h2", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Name";
+    h0.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Relation";
+    h1.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Load";
+    h2.Attributes.Append(t);
+    h.AppendChild(h0);
+    h.AppendChild(h1);
+    h.AppendChild(h2);
+    table.AppendChild(h);
+
+    obj = doc.CreateElement("obj", ns);
+    id = doc.CreateAttribute("id");
+    nm = doc.CreateAttribute("nm");
+    id.Value = "1";
+    nm.Value = "LG1";
+    obj.Attributes.Append(id);
+    obj.Attributes.Append(nm);
+    p0 = doc.CreateElement("p0", ns);
+    v = doc.CreateAttribute("v");
+    v.Value = "LG1";
+    p0.Attributes.Append(v);
+    p2 = doc.CreateElement("p2", ns);
+    v = doc.CreateAttribute("v");
+    t = doc.CreateAttribute("t");
+    v.Value = "0";
+    t.Value = "Permanent";
+    p2.Attributes.Append(v);
+    p2.Attributes.Append(t);
+    obj.AppendChild(p0);
+    obj.AppendChild(p2);
+    table.AppendChild(obj);
+
+
+    container.AppendChild(table);
+    project.AppendChild(container);
+
+    // Load cases
+    container = doc.CreateElement("container", ns);
+    id = doc.CreateAttribute("id");
+    t = doc.CreateAttribute("t");
+    id.Value = "{0908D21F-481F-11D4-AB84-00C06C452330}";
+    t.Value = "DataSetScia.EP_LoadCase.1";
+    container.Attributes.Append(id);
+    container.Attributes.Append(t);
+
+    table = doc.CreateElement("table", ns);
+    id = doc.CreateAttribute("id");
+    t = doc.CreateAttribute("t");
+    name = doc.CreateAttribute("name");
+    id.Value = "1D746346-0F75-4749-9868-17DFF99993BB";
+    t.Value = "DataSetScia.EP_LoadCase.1";
+    name.Value = "Load cases";
+    table.Attributes.Append(id);
+    table.Attributes.Append(t);
+    table.Attributes.Append(name);
+
+    h = doc.CreateElement("h", ns);
+    h0 = doc.CreateElement("h0", ns);
+    h1 = doc.CreateElement("h1", ns);
+    h2 = doc.CreateElement("h2", ns);
+    h3 = doc.CreateElement("h3", ns);
+    XmlNode h4 = doc.CreateElement("h4", ns);
+    h5 = doc.CreateElement("h5", ns);
+    XmlNode h6 = doc.CreateElement("h6", ns);
+    XmlNode h7 = doc.CreateElement("h7", ns);
+    XmlNode h8 = doc.CreateElement("h8", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Name";
+    h0.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "UniqueID";
+    h1.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Action type";
+    h2.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "LoadGroup";
+    h3.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Load type";
+    h4.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Specification";
+    h5.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Duration";
+    h6.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Direction";
+    h7.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Master load case";
+    h8.Attributes.Append(t);
+    h.AppendChild(h0);
+    h.AppendChild(h1);
+    h.AppendChild(h2);
+    h.AppendChild(h3);
+    h.AppendChild(h4);
+    h.AppendChild(h5);
+    h.AppendChild(h6);
+    h.AppendChild(h7);
+    h.AppendChild(h8);
+    table.AppendChild(h);
+
+    obj = doc.CreateElement("obj", ns);
+    id = doc.CreateAttribute("id");
+    id.Value = "1";
+    obj.Attributes.Append(id);
+    nm = doc.CreateAttribute("nm");
+    nm.Value = "Self_weight";
+    obj.Attributes.Append(nm);
+
+    p0 = doc.CreateElement("p0", ns);
+    v = doc.CreateAttribute("v");
+    v.Value = "Self_weight";
+    p0.Attributes.Append(v);
+    obj.AppendChild(p0);
+
+    p1 = doc.CreateElement("p1", ns);
+    v = doc.CreateAttribute("v");
+    v.Value = "{311881EA-4B31-4DCA-B38D-E22038A7BD20}";
+    p1.Attributes.Append(v);
+    obj.AppendChild(p1);
+
+    p2 = doc.CreateElement("p2", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Permanent";
+    p2.Attributes.Append(t);
+    v = doc.CreateAttribute("v");
+    v.Value = "0";
+    p2.Attributes.Append(v);
+    obj.AppendChild(p2);
+
+    p3 = doc.CreateElement("p3", ns);
+    i = doc.CreateAttribute("i");
+    i.Value = "1";
+    p3.Attributes.Append(i);
+    n = doc.CreateAttribute("n");
+    n.Value = "LG1";
+    p3.Attributes.Append(n);
+    obj.AppendChild(p3);
+
+    p4 = doc.CreateElement("p4", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Self weight";
+    p4.Attributes.Append(t);
+    v = doc.CreateAttribute("v");
+    v.Value = "0";
+    p4.Attributes.Append(v);
+    obj.AppendChild(p4);
+
+    p5 = doc.CreateElement("p5", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "-Z";
+    p5.Attributes.Append(t);
+    v = doc.CreateAttribute("v", ns);
+    v.Value = "0";
+    p5.Attributes.Append(v);
+    obj.AppendChild(p5);
+    table.AppendChild(obj);
+
+    for (int j = 0; j < LCName.Count(); j++) {
+      obj = doc.CreateElement("obj", ns);
+      id = doc.CreateAttribute("id");
+      id.Value = (j + 2).ToString();
+      obj.Attributes.Append(id);
+      nm = doc.CreateAttribute("nm");
+      nm.Value = LCName[j];
+      obj.Attributes.Append(nm);
+
+      p0 = doc.CreateElement("p0", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = LCName[j];
+      p0.Attributes.Append(v);
+      obj.AppendChild(p0);
+
+      p1 = doc.CreateElement("p1", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "{" + Convert.ToString(Guid.NewGuid()) + "}";
+      p1.Attributes.Append(v);
+      obj.AppendChild(p1);
+
+      p2 = doc.CreateElement("p2", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Permanent";
+      p2.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = "0";
+      p2.Attributes.Append(v);
+      obj.AppendChild(p2);
+
+      p3 = doc.CreateElement("p3", ns);
+      i = doc.CreateAttribute("i");
+      i.Value = "1";
+      p3.Attributes.Append(i);
+      n = doc.CreateAttribute("n");
+      n.Value = "LG1";
+      p3.Attributes.Append(n);
+      obj.AppendChild(p3);
+
+      p4 = doc.CreateElement("p4", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Standaard";
+      p4.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = "1";
+      p4.Attributes.Append(v);
+      obj.AppendChild(p4);
+
+      table.AppendChild(obj);
+    }
+
+
+    container.AppendChild(table);
+    project.AppendChild(container);
+
+
+    // Nodes
+    container = doc.CreateElement("container", ns);
+    id = doc.CreateAttribute("id");
+    t = doc.CreateAttribute("t");
+    id.Value = "{39A7F468-A0D4-4DFF-8E5C-5843E1807D13}";
+    t.Value = "EP_DSG_Elements.EP_StructNode.1";
+    container.Attributes.Append(id);
+    container.Attributes.Append(t);
+
+    table = doc.CreateElement("table", ns);
+    table = doc.CreateElement("table", ns);
+    id = doc.CreateAttribute("id");
+    t = doc.CreateAttribute("t");
+    name = doc.CreateAttribute("name");
+    id.Value = "EC2218C7-8F88-42E9-9CBB-455B4E989FD9";
+    t.Value = "EP_DSG_Elements.EP_StructNode.1";
+    name.Value = "Node";
+    table.Attributes.Append(id);
+    table.Attributes.Append(t);
+    table.Attributes.Append(name);
+
+    h = doc.CreateElement("h", ns);
+    h0 = doc.CreateElement("h0", ns);
+    h1 = doc.CreateElement("h1", ns);
+    h2 = doc.CreateElement("h2", ns);
+    h3 = doc.CreateElement("h3", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Name";
+    h0.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Coord X";
+    h1.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Coord Y";
+    h2.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Coord Z";
+    h3.Attributes.Append(t);
+    h.AppendChild(h0);
+    h.AppendChild(h1);
+    h.AppendChild(h2);
+    h.AppendChild(h3);
+    table.AppendChild(h);
+
+    for (int j = 0; j < nodes.Count ; j++) {
+      obj = doc.CreateElement("obj", ns);
+      id = doc.CreateAttribute("id");
+      id.Value = (j + 1).ToString();
+      obj.Attributes.Append(id);
+      nm = doc.CreateAttribute("nm");
+      nm.Value = NodeName[j];
+      obj.Attributes.Append(nm);
+
+      p0 = doc.CreateElement("p0", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = NodeName[j];
+      p0.Attributes.Append(v);
+      obj.AppendChild(p0);
+
+      p1 = doc.CreateElement("p1", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = (nodes[j].X).ToString();
+      p1.Attributes.Append(v);
+      obj.AppendChild(p1);
+
+      p2 = doc.CreateElement("p2", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = (nodes[j].Y).ToString();
+      p2.Attributes.Append(v);
+      obj.AppendChild(p2);
+
+      p3 = doc.CreateElement("p3", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = (nodes[j].Z).ToString();
+      p3.Attributes.Append(v);
+      obj.AppendChild(p3);
+
+      table.AppendChild(obj);
+    }
+
+    container.AppendChild(table);
+    project.AppendChild(container);
+
+
+    // Beams
+    container = doc.CreateElement("container", ns);
+    id = doc.CreateAttribute("id");
+    t = doc.CreateAttribute("t");
+    id.Value = "{ECB5D684-7357-11D4-9F6C-00104BC3B443}";
+    t.Value = "EP_DSG_Elements.EP_Beam.1";
+    container.Attributes.Append(id);
+    container.Attributes.Append(t);
+
+    table = doc.CreateElement("table", ns);
+    table = doc.CreateElement("table", ns);
+    id = doc.CreateAttribute("id");
+    t = doc.CreateAttribute("t");
+    name = doc.CreateAttribute("name");
+    id.Value = "5397FDEF-4BB4-4A20-9410-C0B0253F3210";
+    t.Value = "EP_DSG_Elements.EP_Beam.1";
+    name.Value = "Member 1D";
+    table.Attributes.Append(id);
+    table.Attributes.Append(t);
+    table.Attributes.Append(name);
+
+    h = doc.CreateElement("h", ns);
+    h0 = doc.CreateElement("h0", ns);
+    h1 = doc.CreateElement("h1", ns);
+    h2 = doc.CreateElement("h2", ns);
+    h3 = doc.CreateElement("h3", ns);
+    h4 = doc.CreateElement("h4", ns);
+    h5 = doc.CreateElement("h5", ns);
+    h6 = doc.CreateElement("h6", ns);
+    h7 = doc.CreateElement("h7", ns);
+    h8 = doc.CreateElement("h8", ns);
+    h9 = doc.CreateElement("h9", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Name";
+    h0.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Beg. node";
+    h1.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "End node";
+    h2.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Inner nodes";
+    h3.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "CrossSection";
+    h4.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "FEM type";
+    h5.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Member system-line at";
+    h6.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "ey";
+    h7.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "ez";
+    h8.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Table of geometry";
+    h9.Attributes.Append(t);
+    h.AppendChild(h0);
+    h.AppendChild(h1);
+    h.AppendChild(h2);
+    h.AppendChild(h3);
+    h.AppendChild(h4);
+    h.AppendChild(h5);
+    h.AppendChild(h6);
+    h.AppendChild(h7);
+    h.AppendChild(h8);
+    h.AppendChild(h9);
+    table.AppendChild(h);
+
+    for (int j = 0 ; j < BeamName.Count() ; j++) {
+      obj = doc.CreateElement("obj", ns);
+      id = doc.CreateAttribute("id");
+      nm = doc.CreateAttribute("nm");
+      id.Value = (j + 1).ToString();
+      nm.Value = BeamName[j];
+      obj.Attributes.Append(id);
+      obj.Attributes.Append(nm);
+
+      p0 = doc.CreateElement("p0", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = BeamName[j];
+      p0.Attributes.Append(v);
+      obj.AppendChild(p0);
+
+      p1 = doc.CreateElement("p1", ns);
+      n = doc.CreateAttribute("n");
+      n.Value = BeamNodes[j][0];
+      p1.Attributes.Append(n);
+      obj.AppendChild(p1);
+
+      p2 = doc.CreateElement("p2", ns);
+      n = doc.CreateAttribute("n");
+      n.Value = BeamNodes[j][BeamNodes[j].Count() - 1];
+      p2.Attributes.Append(n);
+      obj.AppendChild(p2);
+
+      if (BeamNodes[j].Count() > 2) {
+        for (int k = 1; k < BeamNodes[j].Count - 1 ; k++) {
+          p3 = doc.CreateElement("p3", ns);
+          x = doc.CreateAttribute("x");
+          v1 = doc.CreateAttribute("v1");
+          v2 = doc.CreateAttribute("v2");
+          v3 = doc.CreateAttribute("v3");
+          x.Value = (k - 1).ToString();
+          int index = NodeName.IndexOf(BeamNodes[j][k]);
+          Point3d pt = nodes[index];
+          v1.Value = Convert.ToString(pt.X);
+          v2.Value = Convert.ToString(pt.Y);
+          v3.Value = Convert.ToString(pt.Z);
+          p3.Attributes.Append(x);
+          p3.Attributes.Append(v1);
+          p3.Attributes.Append(v2);
+          p3.Attributes.Append(v3);
+          obj.AppendChild(p3);
+        }
+      }
+      p4 = doc.CreateElement("p4", ns);
+      n = doc.CreateAttribute("n");
+      i = doc.CreateAttribute("i");
+      n.Value = BeamCS[j];
+      i.Value = Convert.ToString(CSType2.IndexOf(BeamCS[j]) + 1);
+      p4.Attributes.Append(n);
+      p4.Attributes.Append(i);
+      obj.AppendChild(p4);
+
+      p5 = doc.CreateElement("p5", ns);
+      t = doc.CreateAttribute("t");
+      v = doc.CreateAttribute("v");
+      t.Value = "standard";
+      v.Value = "0";
+      p5.Attributes.Append(t);
+      p5.Attributes.Append(v);
+      obj.AppendChild(p5);
+
+      p6 = doc.CreateElement("p6", ns);
+      t = doc.CreateAttribute("t");
+      v = doc.CreateAttribute("v");
+      t.Value = "Centre";
+      v.Value = "1";
+      p6.Attributes.Append(t);
+      p6.Attributes.Append(v);
+      obj.AppendChild(p6);
+
+      p7 = doc.CreateElement("p7", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "0";
+      p7.Attributes.Append(v);
+      obj.AppendChild(p7);
+
+      p8 = doc.CreateElement("p8", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "0";
+      p8.Attributes.Append(v);
+      obj.AppendChild(p8);
+
+      p9 = doc.CreateElement("p9", ns);
+      h = doc.CreateElement("h", ns);
+      h1 = doc.CreateElement("h1", ns);
+      h2 = doc.CreateElement("h2", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Node";
+      h1.Attributes.Append(t);
+      t = doc.CreateAttribute("t");
+      t.Value = "Edge";
+      h2.Attributes.Append(t);
+      h.AppendChild(h1);
+      h.AppendChild(h2);
+      p9.AppendChild(h);
+      //for loop over all nodes specified in line or curve
+      for (int k = 0; k < BeamNodes[j].Count() ; k++) {
+        row = doc.CreateElement("row", ns);
+
+        id = doc.CreateAttribute("id");
+        id.Value = k.ToString();
+        row.Attributes.Append(id);
+
+        p1 = doc.CreateElement("p1", ns);
+
+        n = doc.CreateAttribute("n");
+        n.Value = BeamNodes[j][k];
+        p1.Attributes.Append(n);
+
+        i = doc.CreateAttribute("i");
+        i.Value = Convert.ToString(NodeName.IndexOf(BeamNodes[j][k]) + 1);
+        p1.Attributes.Append(i);
+
+        row.AppendChild(p1);
+        if (k == 0) {
+          p2 = doc.CreateElement("p2", ns);
+          t = doc.CreateAttribute("t");
+          t.Value = BeamType[j];
+          p2.Attributes.Append(t);
+          v = doc.CreateAttribute("v");
+          if (BeamType[j] == "Lijn") {
+            v.Value = "0";
+          } else if (BeamType[j] == "Spline") {
+            v.Value = "7";
+          }
+          p2.Attributes.Append(v);
+          row.AppendChild(p2);
+
+        }
+        p9.AppendChild(row);
+      }
+      obj.AppendChild(p9);
+
+      table.AppendChild(obj);
+    }
+
+
+    container.AppendChild(table);
+    project.AppendChild(container);
+
+
+    // Supports in nodes
+    container = doc.CreateElement("container", ns);
+    id = doc.CreateAttribute("id");
+    id.Value = "{1CBCA4DE-355B-40F7-A91D-8EFD26A6404D}";
+    container.Attributes.Append(id);
+    t = doc.CreateAttribute("t");
+    t.Value = "DataAddSupport.EP_PointSupportPoint.1";
+    container.Attributes.Append(t);
+    table = doc.CreateElement("table", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "DataAddSupport.EP_PointSupportPoint.1";
+    table.Attributes.Append(t);
+    id = doc.CreateAttribute("id");
+    id.Value = "6F3C9FC6-2FC6-420C-81CA-5702BFBE42E4";
+    table.Attributes.Append(id);
+    name = doc.CreateAttribute("name");
+    name.Value = "Supports in node";
+    table.Attributes.Append(name);
+
+
+    h = doc.CreateElement("h", ns);
+    h0 = doc.CreateElement("h0", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Name";
+    h0.Attributes.Append(t);
+    h.AppendChild(h0);
+
+    h1 = doc.CreateElement("h1", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Reference Table";
+    h1.Attributes.Append(t);
+    h.AppendChild(h1);
+
+    h2 = doc.CreateElement("h2", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Type";
+    h2.Attributes.Append(t);
+    h.AppendChild(h2);
+
+    h3 = doc.CreateElement("h3", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "X";
+    h3.Attributes.Append(t);
+    h.AppendChild(h3);
+
+    h4 = doc.CreateElement("h4", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Y";
+    h4.Attributes.Append(t);
+    h.AppendChild(h4);
+
+    h5 = doc.CreateElement("h5", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Z";
+    h5.Attributes.Append(t);
+    h.AppendChild(h5);
+
+    h6 = doc.CreateElement("h6", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Rx";
+    h6.Attributes.Append(t);
+    h.AppendChild(h6);
+
+    h7 = doc.CreateElement("h7", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Ry";
+    h7.Attributes.Append(t);
+    h.AppendChild(h7);
+
+    h8 = doc.CreateElement("h8", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Rz";
+    h8.Attributes.Append(t);
+    h.AppendChild(h8);
+
+    table.AppendChild(h);
+
+    for (int j = 0 ; j < SupMemName.Count() ; j++) {
+      obj = doc.CreateElement("obj", ns);
+      id = doc.CreateAttribute("id");
+      id.Value = (j + 1).ToString();
+      obj.Attributes.Append(id);
+      nm = doc.CreateAttribute("nm");
+      nm.Value = "Sn" + (j + 1).ToString();
+      obj.Attributes.Append(nm);
+
+      p0 = doc.CreateElement("p0", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "Sn" + (j + 1).ToString();
+      p0.Attributes.Append(v);
+      obj.AppendChild(p0);
+
+      p1 = doc.CreateElement("p1", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "";
+      p1.Attributes.Append(t);
+
+      h = doc.CreateElement("h", ns);
+      h0 = doc.CreateElement("h0", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Member Type";
+      h0.Attributes.Append(t);
+      h.AppendChild(h0);
+
+      h1 = doc.CreateElement("h1", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Member Type Name";
+      h1.Attributes.Append(t);
+      h.AppendChild(h1);
+
+      h3 = doc.CreateElement("h3", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Member Name";
+      h3.Attributes.Append(t);
+      h.AppendChild(h3);
+      p1.AppendChild(h);
+
+      row = doc.CreateElement("row", ns);
+      id = doc.CreateAttribute("id");
+      id.Value = j.ToString();
+      row.Attributes.Append(id);
+
+      p0 = doc.CreateElement("p0", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "{39A7F468-A0D4-4DFF-8E5C-5843E1807D13}";
+      p0.Attributes.Append(v);
+      row.AppendChild(p0);
+
+      p5 = doc.CreateElement("p1", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "EP_DSG_Elements.EP_StructNode.1";
+      p5.Attributes.Append(v);
+      row.AppendChild(p5);
+
+      p3 = doc.CreateElement("p3", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = SupMemName[j];
+      p3.Attributes.Append(v);
+      row.AppendChild(p3);
+
+      p1.AppendChild(row);
+      obj.AppendChild(p1);
+
+      p2 = doc.CreateElement("p2", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Standaard";
+      p2.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = "0";
+      p2.Attributes.Append(v);
+      obj.AppendChild(p2);
+
+      p3 = doc.CreateElement("p3", ns);
+      t = doc.CreateAttribute("t");
+      switch (SupDofX[j])
+      {
+        case "0": t.Value = "Vrij";
+          break;
+        case "1": t.Value = "Vast";
+          break;
+      }
+      p3.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = SupDofX[j];
+      p3.Attributes.Append(v);
+      obj.AppendChild(p3);
+
+      p4 = doc.CreateElement("p4", ns);
+      t = doc.CreateAttribute("t");
+      switch (SupDofY[j])
+      {
+        case "0": t.Value = "Vrij";
+          break;
+        case "1": t.Value = "Vast";
+          break;
+      }
+      p4.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = SupDofY[j];
+      p4.Attributes.Append(v);
+      obj.AppendChild(p4);
+
+      p5 = doc.CreateElement("p5", ns);
+      t = doc.CreateAttribute("t");
+      switch (SupDofZ[j])
+      {
+        case "0": t.Value = "Vrij";
+          break;
+        case "1": t.Value = "Vast";
+          break;
+      }
+      p5.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = SupDofZ[j];
+      p5.Attributes.Append(v);
+      obj.AppendChild(p5);
+
+      p6 = doc.CreateElement("p6", ns);
+      t = doc.CreateAttribute("t");
+      switch (SupDofRx[j])
+      {
+        case "0": t.Value = "Vrij";
+          break;
+        case "1": t.Value = "Vast";
+          break;
+      }
+      p6.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = SupDofRx[j];
+      p6.Attributes.Append(v);
+      obj.AppendChild(p6);
+
+      p7 = doc.CreateElement("p7", ns);
+      t = doc.CreateAttribute("t");
+      switch (SupDofRy[j])
+      {
+        case "0": t.Value = "Vrij";
+          break;
+        case "1": t.Value = "Vast";
+          break;
+      }
+      p7.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = SupDofRy[j];
+      p7.Attributes.Append(v);
+      obj.AppendChild(p7);
+
+      p8 = doc.CreateElement("p8", ns);
+      t = doc.CreateAttribute("t");
+      switch (SupDofRz[j])
+      {
+        case "0": t.Value = "Vrij";
+          break;
+        case "1": t.Value = "Vast";
+          break;
+      }
+      p8.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = SupDofRz[j];
+      p8.Attributes.Append(v);
+      obj.AppendChild(p8);
+
+      table.AppendChild(obj);
+    }
+
+    container.AppendChild(table);
+    project.AppendChild(container);
+
+    // Points forces
+    container = doc.CreateElement("container", ns);
+    id = doc.CreateAttribute("id");
+    t = doc.CreateAttribute("t");
+    id.Value = "{F8371A21-F459-11D4-94D3-000000000000}";
+    t.Value = "DataAddLoad.EP_PointForcePoint.1";
+    container.Attributes.Append(id);
+    container.Attributes.Append(t);
+
+    table = doc.CreateElement("table", ns);
+    table = doc.CreateElement("table", ns);
+    id = doc.CreateAttribute("id");
+    t = doc.CreateAttribute("t");
+    name = doc.CreateAttribute("name");
+    id.Value = "B18277EC-05CC-4CCD-BE23-B3D742F20AF8";
+    t.Value = "DataAddLoad.EP_PointForcePoint.1";
+    name.Value = "Point forces in node";
+    table.Attributes.Append(id);
+    table.Attributes.Append(t);
+    table.Attributes.Append(name);
+
+    h = doc.CreateElement("h", ns);
+    h0 = doc.CreateElement("h0", ns);
+    h1 = doc.CreateElement("h1", ns);
+    h2 = doc.CreateElement("h2", ns);
+    h3 = doc.CreateElement("h3", ns);
+    h4 = doc.CreateElement("h4", ns);
+    h5 = doc.CreateElement("h5", ns);
+    h6 = doc.CreateElement("h6", ns);
+    h7 = doc.CreateElement("h7", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Name";
+    h0.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Load case";
+    h1.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Reference Table";
+    h2.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Direction";
+    h3.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Type";
+    h4.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Value - F";
+    h5.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "System";
+    h6.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Angle [deg]";
+    h7.Attributes.Append(t);
+    h.AppendChild(h0);
+    h.AppendChild(h1);
+    h.AppendChild(h2);
+    h.AppendChild(h3);
+    h.AppendChild(h4);
+    h.AppendChild(h5);
+    h.AppendChild(h6);
+    h.AppendChild(h7);
+    table.AppendChild(h);
+
+    // Script for pointloads
+
+    for (int j = 0 ; j < PMemberName.Count() ; j++) {
+      obj = doc.CreateElement("obj", ns);
+      id = doc.CreateAttribute("id");
+      id.Value = (j + 1).ToString();
+      obj.Attributes.Append(id);
+      nm = doc.CreateAttribute("nm");
+      nm.Value = "PL" + (j + 1).ToString();
+      obj.Attributes.Append(nm);
+
+      p0 = doc.CreateElement("p0", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "PL" + (j + 1).ToString();
+      p0.Attributes.Append(v);
+      obj.AppendChild(p0);
+
+      p1 = doc.CreateElement("p1", ns);
+      i = doc.CreateAttribute("i");
+      i.Value = (j + 1).ToString();
+      p1.Attributes.Append(i);
+      n = doc.CreateAttribute("n");
+      n.Value = PLLC[j];
+      p1.Attributes.Append(n);
+      obj.AppendChild(p1);
+
+      p2 = doc.CreateElement("p2", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "";
+      p2.Attributes.Append(t);
+      h = doc.CreateElement("h", ns);
+      h0 = doc.CreateElement("h0", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Member Type";
+      h0.Attributes.Append(t);
+      h.AppendChild(h0);
+      h1 = doc.CreateElement("h1", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Member Type Name";
+      h1.Attributes.Append(t);
+      h.AppendChild(h1);
+      h2 = doc.CreateElement("h2", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Member Name";
+      h2.Attributes.Append(t);
+      h.AppendChild(h2);
+      p2.AppendChild(h);
+
+      row = doc.CreateElement("row", ns);
+      id = doc.CreateAttribute("id");
+      id.Value = "0";
+      row.Attributes.Append(id);
+
+      p0 = doc.CreateElement("p0", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "{39A7F468-A0D4-4DFF-8E5C-5843E1807D13}";
+      p0.Attributes.Append(v);
+      row.AppendChild(p0);
+
+      p1 = doc.CreateElement("p1", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "EP_DSG_Elements.EP_StructNode.1";
+      p1.Attributes.Append(v);
+      row.AppendChild(p1);
+
+      p3 = doc.CreateElement("p2", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = PMemberName[j];
+      p3.Attributes.Append(v);
+      row.AppendChild(p3);
+
+      p2.AppendChild(row);
+      obj.AppendChild(p2);
+
+      p3 = doc.CreateElement("p3", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = PLDir[j];
+      p3.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      switch (PLDir[j])
+      {
+        case "X": v.Value = "0";
+          break;
+        case "Y": v.Value = "1";
+          break;
+        case "Z": v.Value = "2";
+          break;
+      }
+      p3.Attributes.Append(v);
+      obj.AppendChild(p3);
+
+      p4 = doc.CreateElement("p4", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Kracht";
+      p4.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = "0";
+      p4.Attributes.Append(v);
+      obj.AppendChild(p4);
+
+      p5 = doc.CreateElement("p5", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = PLValue[j];
+      p5.Attributes.Append(v);
+      obj.AppendChild(p5);
+
+      p6 = doc.CreateElement("p6", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = PLCS[j];
+      p6.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      switch (PLCS[j])
+      {
+        case "GCS": v.Value = "0";
+          break;
+        case "LCS": v.Value = "1";
+          break;
+      }
+      p6.Attributes.Append(v);
+      obj.AppendChild(p6);
+
+      p7 = doc.CreateElement("p7", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "Rx" + Convert.ToString(PLAngle[j].X) + ",Ry" + Convert.ToString(PLAngle[j].Y) + ",Rz" + Convert.ToString(PLAngle[j].Z);
+      p7.Attributes.Append(v);
+      obj.AppendChild(p7);
+
+      table.AppendChild(obj);
+    }
+
+    container.AppendChild(table);
+    project.AppendChild(container);
+
+
+    // Line loads
+    container = doc.CreateElement("container", ns);
+    id = doc.CreateAttribute("id");
+    t = doc.CreateAttribute("t");
+    id.Value = "{BC16B3C6-F464-11D4-94D3-000000000000}";
+    t.Value = "DataAddLoad.EP_LineForceLine.1";
+    container.Attributes.Append(id);
+    container.Attributes.Append(t);
+
+    table = doc.CreateElement("table", ns);
+    table = doc.CreateElement("table", ns);
+    id = doc.CreateAttribute("id");
+    t = doc.CreateAttribute("t");
+    name = doc.CreateAttribute("name");
+    id.Value = "05EDCF26-EC40-4EAA-B4C1-5BBC26A6F6D1";
+    t.Value = "DataAddLoad.EP_LineForceLine.1";
+    name.Value = "Line forces on beam";
+    table.Attributes.Append(id);
+    table.Attributes.Append(t);
+    table.Attributes.Append(name);
+
+    h = doc.CreateElement("h", ns);
+    h0 = doc.CreateElement("h0", ns);
+    h1 = doc.CreateElement("h1", ns);
+    h2 = doc.CreateElement("h2", ns);
+    h3 = doc.CreateElement("h3", ns);
+    h4 = doc.CreateElement("h4", ns);
+    h5 = doc.CreateElement("h5", ns);
+    h6 = doc.CreateElement("h6", ns);
+    h7 = doc.CreateElement("h7", ns);
+    h8 = doc.CreateElement("h8", ns);
+    h9 = doc.CreateElement("h9", ns);
+    XmlNode h10 = doc.CreateElement("h10", ns);
+    XmlNode h11 = doc.CreateElement("h11", ns);
+    XmlNode h12 = doc.CreateElement("h12", ns);
+    XmlNode h13 = doc.CreateElement("h13", ns);
+    XmlNode h14 = doc.CreateElement("h14", ns);
+    XmlNode h15 = doc.CreateElement("h15", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Name";
+    h0.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Load case";
+    h1.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Reference Table";
+    h2.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Direction";
+    h3.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Type";
+    h4.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Distribution";
+    h5.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Value - P\u00401";
+    h6.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Load above joint";
+    h7.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "System";
+    h8.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Location";
+    h9.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Position x1";
+    h10.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Position x1";
+    h11.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Coord. definition";
+    h12.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Origin";
+    h13.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Eccentricity ey";
+    h14.Attributes.Append(t);
+    t = doc.CreateAttribute("t");
+    t.Value = "Eccentricity ez";
+    h15.Attributes.Append(t);
+    h.AppendChild(h0);
+    h.AppendChild(h1);
+    h.AppendChild(h2);
+    h.AppendChild(h3);
+    h.AppendChild(h4);
+    h.AppendChild(h5);
+    h.AppendChild(h6);
+    h.AppendChild(h7);
+    h.AppendChild(h8);
+    h.AppendChild(h9);
+    h.AppendChild(h10);
+    h.AppendChild(h11);
+    h.AppendChild(h12);
+    h.AppendChild(h13);
+    h.AppendChild(h14);
+    h.AppendChild(h15);
+    table.AppendChild(h);
+
+    for (int j = 0; j < LMemberName.Count() ; j++) {
+      obj = doc.CreateElement("obj", ns);
+      id = doc.CreateAttribute("id");
+      id.Value = (j + 1).ToString();
+      obj.Attributes.Append(id);
+      nm = doc.CreateAttribute("nm");
+      nm.Value = "LL" + (j + 1).ToString();
+      obj.Attributes.Append(nm);
+      p0 = doc.CreateElement("p0", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "LL" + (j + 1).ToString();
+      p0.Attributes.Append(v);
+      obj.AppendChild(p0);
+
+      p1 = doc.CreateElement("p1", ns);
+      i = doc.CreateAttribute("i");
+      i.Value = Convert.ToString(LCName.IndexOf(LLLC[j]) + 1);
+      p1.Attributes.Append(i);
+      n = doc.CreateAttribute("n");
+      n.Value = LLLC[j];
+      p1.Attributes.Append(n);
+      obj.AppendChild(p1);
+
+      p2 = doc.CreateElement("p2", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "";
+      p2.Attributes.Append(t);
+      h = doc.CreateElement("h", ns);
+      h0 = doc.CreateElement("h0", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Member Type";
+      h0.Attributes.Append(t);
+      h.AppendChild(h0);
+      h1 = doc.CreateElement("h1", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Member Type Name";
+      h1.Attributes.Append(t);
+      h.AppendChild(h1);
+      h2 = doc.CreateElement("h2", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Member Name";
+      h2.Attributes.Append(t);
+      h.AppendChild(h2);
+      p2.AppendChild(h);
+
+      row = doc.CreateElement("row", ns);
+      id = doc.CreateAttribute("id");
+      id.Value = "0";
+      row.Attributes.Append(id);
+
+      p0 = doc.CreateElement("p0", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "{ECB5D684-7357-11D4-9F6C-00104BC3B443}";
+      p0.Attributes.Append(v);
+      row.AppendChild(p0);
+
+      p1 = doc.CreateElement("p1", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "EP_DSG_Elements.EP_Beam.1";
+      p1.Attributes.Append(v);
+      row.AppendChild(p1);
+
+      p3 = doc.CreateElement("p2", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = LMemberName[j];
+      p3.Attributes.Append(v);
+      row.AppendChild(p3);
+
+      p2.AppendChild(row);
+      obj.AppendChild(p2);
+
+      p3 = doc.CreateElement("p3", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = LLDir[j];
+      p3.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      switch (LLDir[j])
+      {
+        case "X": v.Value = "0";
+          break;
+        case "Y": v.Value = "1";
+          break;
+        case "Z": v.Value = "2";
+          break;
+      }
+      p3.Attributes.Append(v);
+      obj.AppendChild(p3);
+
+      p4 = doc.CreateElement("p4", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Kracht";
+      p4.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = "0";
+      p4.Attributes.Append(v);
+      obj.AppendChild(p4);
+
+      p5 = doc.CreateElement("p5", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Uniform";
+      p5.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = "0";
+      p5.Attributes.Append(v);
+      obj.AppendChild(p5);
+
+      p6 = doc.CreateElement("p6", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = LLValue[j];
+      p6.Attributes.Append(v);
+      obj.AppendChild(p6);
+
+      p7 = doc.CreateElement("p7", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "0";
+      p7.Attributes.Append(v);
+      obj.AppendChild(p7);
+
+      p8 = doc.CreateElement("p8", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = LLCS[j];
+      p8.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      switch (LLCS[j])
+      {
+        case "GCS": v.Value = "0";
+          break;
+        case "LCS": v.Value = "1";
+          break;
+      }
+      p8.Attributes.Append(v);
+      obj.AppendChild(p8);
+
+      p9 = doc.CreateElement("p9", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Length";
+      p9.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = "0";
+      p9.Attributes.Append(v);
+      obj.AppendChild(p9);
+
+      p10 = doc.CreateElement("p10", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "0";
+      p10.Attributes.Append(v);
+      obj.AppendChild(p10);
+
+      p11 = doc.CreateElement("p11", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "1";
+      p11.Attributes.Append(v);
+      obj.AppendChild(p11);
+
+      p12 = doc.CreateElement("p12", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Rela";
+      p12.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = "1";
+      p12.Attributes.Append(v);
+      obj.AppendChild(p12);
+
+      p13 = doc.CreateElement("p13", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "From start";
+      p13.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = "0";
+      p13.Attributes.Append(v);
+      obj.AppendChild(p13);
+
+      p14 = doc.CreateElement("p14", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "0";
+      p14.Attributes.Append(v);
+      obj.AppendChild(p14);
+      p15 = doc.CreateElement("p15", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "0";
+      p15.Attributes.Append(v);
+      obj.AppendChild(p15);
+
+      table.AppendChild(obj);
+    }
+
+    container.AppendChild(table);
+    project.AppendChild(container);
+
+    // Hinges on beams
+    container = doc.CreateElement("container", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "DataAddScia.EP_Hinge.1";
+    container.Attributes.Append(t);
+    id = doc.CreateAttribute("id");
+    id.Value = "{56DE8D92-C9D3-11D4-A46B-00C06C542707}";
+    container.Attributes.Append(id);
+
+    table = doc.CreateElement("table", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "DataAddScia.EP_Hinge.1";
+    table.Attributes.Append(t);
+    id = doc.CreateAttribute("id");
+    id.Value = "9C82E5B0-3163-43F5-8680-7487E1151533";
+    table.Attributes.Append(id);
+    name = doc.CreateAttribute("name");
+    name.Value = "Hinges on beam";
+    table.Attributes.Append(name);
+
+    h = doc.CreateElement("h", ns);
+    h0 = doc.CreateElement("h0", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Reference Table";
+    h0.Attributes.Append(t);
+    h.AppendChild(h0);
+    h1 = doc.CreateElement("h1", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Name";
+    h1.Attributes.Append(t);
+    h.AppendChild(h1);
+    h2 = doc.CreateElement("h2", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "UniqueID";
+    h2.Attributes.Append(t);
+    h.AppendChild(h2);
+    h3 = doc.CreateElement("h3", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "Position";
+    h3.Attributes.Append(t);
+    h.AppendChild(h3);
+    h4 = doc.CreateElement("h4", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "ux";
+    h4.Attributes.Append(t);
+    h.AppendChild(h4);
+    h5 = doc.CreateElement("h5", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "uy";
+    h5.Attributes.Append(t);
+    h.AppendChild(h5);
+    h6 = doc.CreateElement("h6", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "uz";
+    h6.Attributes.Append(t);
+    h.AppendChild(h6);
+    h7 = doc.CreateElement("h7", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "fix";
+    h7.Attributes.Append(t);
+    h.AppendChild(h7);
+    h8 = doc.CreateElement("h8", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "fiy";
+    h8.Attributes.Append(t);
+    h.AppendChild(h8);
+    h9 = doc.CreateElement("h9", ns);
+    t = doc.CreateAttribute("t");
+    t.Value = "fiz";
+    h9.Attributes.Append(t);
+    h.AppendChild(h9);
+
+    table.AppendChild(h);
+
+    for (int j = 0; j < HBeamName.Count(); j++) {
+
+      obj = doc.CreateElement("obj", ns);
+      id = doc.CreateAttribute("id");
+      id.Value = (j + 1).ToString();
+      obj.Attributes.Append(id);
+      nm = doc.CreateAttribute("nm");
+      nm.Value = "H" + (j + 1).ToString();
+      obj.Attributes.Append(nm);
+
+      p0 = doc.CreateElement("p0", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "";
+      p0.Attributes.Append(t);
+
+      h = doc.CreateElement("h", ns);
+      h0 = doc.CreateElement("h0", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Member Type";
+      h0.Attributes.Append(t);
+      h.AppendChild(h0);
+      h1 = doc.CreateElement("h1", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Member Type Name";
+      h1.Attributes.Append(t);
+      h.AppendChild(h1);
+      h3 = doc.CreateElement("h3", ns);
+      t = doc.CreateAttribute("t");
+      t.Value = "Member Name";
+      h3.Attributes.Append(t);
+      h.AppendChild(h3);
+      p0.AppendChild(h);
+
+      row = doc.CreateElement("row", ns);
+      id = doc.CreateAttribute("id");
+      id.Value = "0";
+      row.Attributes.Append(id);
+      p5 = doc.CreateElement("p0", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "{ECB5D684-7357-11D4-9F6C-00104BC3B443}";
+      p5.Attributes.Append(v);
+      row.AppendChild(p5);
+      p1 = doc.CreateElement("p1", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "EP_DSG_Elements.EP_Beam.1";
+      p1.Attributes.Append(v);
+      row.AppendChild(p1);
+      p3 = doc.CreateElement("p3", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = HBeamName[j];
+      p3.Attributes.Append(v);
+      row.AppendChild(p3);
+
+      p0.AppendChild(row);
+      obj.AppendChild(p0);
+
+      p1 = doc.CreateElement("p1", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "H" + (j + 1).ToString();
+      p1.Attributes.Append(v);
+      obj.AppendChild(p1);
+
+      p2 = doc.CreateElement("p2", ns);
+      v = doc.CreateAttribute("v");
+      v.Value = "{" + Convert.ToString(Guid.NewGuid()) + "}";
+      p2.Attributes.Append(v);
+      obj.AppendChild(p2);
+
+      p3 = doc.CreateElement("p3", ns);
+      t = doc.CreateAttribute("t");
+      switch (HEnds[j])
+      {
+        case "0": t.Value = "Begin";
+          break;
+        case "1": t.Value = "End";
+          break;
+        case "2": t.Value = "Both";
+          break;
+      }
+      p3.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = HEnds[j];
+      p3.Attributes.Append(v);
+      obj.AppendChild(p3);
+
+      p4 = doc.CreateElement("p4", ns);
+      t = doc.CreateAttribute("t");
+      switch (HX[j])
+      {
+        case "0": t.Value = "Vrij";
+          break;
+        case "1": t.Value = "Vast";
+          break;
+      }
+      p4.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = HX[j];
+      p4.Attributes.Append(v);
+      obj.AppendChild(p4);
+
+      p5 = doc.CreateElement("p5", ns);
+      t = doc.CreateAttribute("t");
+      switch (HY[j])
+      {
+        case "0": t.Value = "Vrij";
+          break;
+        case "1": t.Value = "Vast";
+          break;
+      }
+      p5.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = HY[j];
+      p5.Attributes.Append(v);
+      obj.AppendChild(p5);
+
+      p6 = doc.CreateElement("p6", ns);
+      t = doc.CreateAttribute("t");
+      switch (HZ[j])
+      {
+        case "0": t.Value = "Vrij";
+          break;
+        case "1": t.Value = "Vast";
+          break;
+      }
+      p6.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = HZ[j];
+      p6.Attributes.Append(v);
+      obj.AppendChild(p6);
+
+      p7 = doc.CreateElement("p7", ns);
+      t = doc.CreateAttribute("t");
+      switch (Hfix[j])
+      {
+        case "0": t.Value = "Vrij";
+          break;
+        case "1": t.Value = "Vast";
+          break;
+      }
+      p7.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = Hfix[j];
+      p7.Attributes.Append(v);
+      obj.AppendChild(p7);
+
+      p8 = doc.CreateElement("p8", ns);
+      t = doc.CreateAttribute("t");
+      switch (Hfiy[j])
+      {
+        case "0": t.Value = "Vrij";
+          break;
+        case "1": t.Value = "Vast";
+          break;
+      }
+      p8.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = Hfiy[j];
+      p8.Attributes.Append(v);
+      obj.AppendChild(p8);
+
+      p9 = doc.CreateElement("p9", ns);
+      t = doc.CreateAttribute("t");
+      switch (Hfiz[j])
+      {
+        case "0": t.Value = "Vrij";
+          break;
+        case "1": t.Value = "Vast";
+          break;
+      }
+      p9.Attributes.Append(t);
+      v = doc.CreateAttribute("v");
+      v.Value = Hfiz[j];
+      p9.Attributes.Append(v);
+      obj.AppendChild(p9);
+
+      table.AppendChild(obj);
+    }
+
+    container.AppendChild(table);
+    project.AppendChild(container);
+
+
+    if (write == true) {
+      doc.Save(@path + filename);
+      };
+
+    A = "Make sure the .xml.def file is in the same folder as the .xml file when importing into Scia.";
+  }
+
+  // <Custom additional code> 
+
+  // </Custom additional code> 
+}

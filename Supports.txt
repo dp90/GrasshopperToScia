@@ -1,0 +1,119 @@
+using Rhino;
+using Rhino.Geometry;
+using Rhino.DocObjects;
+using Rhino.Collections;
+
+using GH_IO;
+using GH_IO.Serialization;
+using Grasshopper;
+using Grasshopper.Kernel;
+using Grasshopper.Kernel.Data;
+using Grasshopper.Kernel.Types;
+
+using System;
+using System.IO;
+using System.Xml;
+using System.Xml.Linq;
+using System.Linq;
+using System.Data;
+using System.Drawing;
+using System.Reflection;
+using System.Collections;
+using System.Windows.Forms;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+
+
+/// <summary>
+/// This class will be instantiated on demand by the Script component.
+/// </summary>
+public class Script_Instance : GH_ScriptInstance
+{
+#region Utility functions
+  /// <summary>Print a String to the [Out] Parameter of the Script component.</summary>
+  /// <param name="text">String to print.</param>
+  private void Print(string text) { /* Implementation hidden. */ }
+  /// <summary>Print a formatted String to the [Out] Parameter of the Script component.</summary>
+  /// <param name="format">String format.</param>
+  /// <param name="args">Formatting parameters.</param>
+  private void Print(string format, params object[] args) { /* Implementation hidden. */ }
+  /// <summary>Print useful information about an object instance to the [Out] Parameter of the Script component. </summary>
+  /// <param name="obj">Object instance to parse.</param>
+  private void Reflect(object obj) { /* Implementation hidden. */ }
+  /// <summary>Print the signatures of all the overloads of a specific method to the [Out] Parameter of the Script component. </summary>
+  /// <param name="obj">Object instance to parse.</param>
+  private void Reflect(object obj, string method_name) { /* Implementation hidden. */ }
+#endregion
+
+#region Members
+  /// <summary>Gets the current Rhino document.</summary>
+  private readonly RhinoDoc RhinoDocument;
+  /// <summary>Gets the Grasshopper document that owns this script.</summary>
+  private readonly GH_Document GrasshopperDocument;
+  /// <summary>Gets the Grasshopper script component that owns this script.</summary>
+  private readonly IGH_Component Component;
+  /// <summary>
+  /// Gets the current iteration count. The first call to RunScript() is associated with Iteration==0.
+  /// Any subsequent call within the same solution will increment the Iteration count.
+  /// </summary>
+  private readonly int Iteration;
+#endregion
+
+  /// <summary>
+  /// This procedure contains the user code. Input parameters are provided as regular arguments,
+  /// Output parameters as ref arguments. You don't have to assign output parameters,
+  /// they will have a default value.
+  /// </summary>
+  private void RunScript(List<object> Points, List<string> X, List<string> Y, List<string> Z, List<string> Rx, List<string> Ry, List<string> Rz, ref object Supports)
+  {
+    DataTree<Object> supports = new DataTree<Object>();
+    // loop through all points in the input points
+    for (int i = 0 ; i < Points.Count() ; i++) {
+      // add point to branch {0}
+      supports.Add(Points[i], new GH_Path(0));
+      // check if 1 X d.o.f. is supplied or multiple, and create list accordingly
+      if (Points.Count() == X.Count()) {
+        supports.Add(X[i], new GH_Path(1));
+      } else {
+        supports.Add(X[0], new GH_Path(1));
+      }
+      // check if 1 Y d.o.f. is supplied or multiple, and create list accordingly
+      if (Points.Count() == Y.Count()) {
+        supports.Add(Y[i], new GH_Path(2));
+      } else {
+        supports.Add(Y[0], new GH_Path(2));
+      }
+      // check if 1 Z d.o.f. is supplied or multiple, and create list accordingly
+      if (Points.Count() == Z.Count()) {
+        supports.Add(Z[i], new GH_Path(3));
+      } else {
+        supports.Add(Z[0], new GH_Path(3));
+      }
+      // check if 1 Rx d.o.f. is supplied or multiple, and create list accordingly
+      if (Points.Count() == Rx.Count()) {
+        supports.Add(Rx[i], new GH_Path(4));
+      } else {
+        supports.Add(Rx[0], new GH_Path(4));
+      }
+      // check if 1 Ry d.o.f. is supplied or multiple, and create list accordingly
+      if (Points.Count() == Ry.Count()) {
+        supports.Add(Ry[i], new GH_Path(5));
+      } else {
+        supports.Add(Ry[0], new GH_Path(5));
+      }
+      // check if 1 Rz d.o.f. is supplied or multiple, and create list accordingly
+      if (Points.Count() == Rz.Count()) {
+        supports.Add(Rz[i], new GH_Path(6));
+      } else {
+        supports.Add(Rz[0], new GH_Path(6));
+      }
+    }
+
+    Supports = supports;
+  }
+
+  // <Custom additional code> 
+
+  // </Custom additional code> 
+}
